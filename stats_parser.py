@@ -22,12 +22,12 @@ def run_stats_calculation(comp_id, stage_name="tournament"):
     for item in standings_data:
         t_id = item['TeamID']
         t_info = item.get('CompTeamName', {})
-        # Берем максимально полное имя для маппинга, чтобы не было путаницы
+        # Используем короткое имя, но БЕЗ обрезки "(молодежная)" и т.п.
         t_name = (t_info.get('CompTeamShortNameRu') or t_info.get('CompTeamNameRu') or "Unknown").strip()
         city = t_info.get('CompTeamRegionNameRu', '')
         full_display_name = f"{t_name} ({city})" if city else t_name
-        
-        team_map[t_id] = t_name
+
+        team_map[t_id] = t_name  # Сохраняем полное название (включая "(молодежная)")
         team_order_ids.append(t_id)
         calculated_stats[t_id] = {
             'Команда': full_display_name, 
@@ -74,33 +74,43 @@ def run_stats_calculation(comp_id, stage_name="tournament"):
 
     df_s = pd.DataFrame(final_rows).sort_values(['Очки', '+/-'], ascending=[False, False])
     df_s.insert(0, 'Место', range(1, len(df_s) + 1))
-    
-    # Обновляем порядок имен для шахматки на основе итоговых мест
-    sorted_team_names = [team_map[tid] for tid in df_s.index.map(lambda x: team_order_ids[x])]
-    # Но проще взять из отсортированного DF
-    sorted_names = df_s['Команда'].apply(lambda x: x.split(' (')[0]).tolist()
 
-    # 4. Сборка шахматки (Безопасная версия)
-    matrix = pd.DataFrame("", index=sorted_names, columns=sorted_names)
-    for t in sorted_names: 
-        if t in matrix.index: matrix.loc[t, t] = "---"
+    # 4. Сборка шахматки
+    # Создаем маппинг: full_display_name (из standings) -> short_name (из team_map)
+    # Чтобы найти correct name для матрицы по отсортированному DataFrame
+    stats_name_to_team_name = {}
+    for t_id in team_order_ids:
+        stats_name = calculated_stats[t_id]['Команда']
+        stats_name_to_team_name[stats_name] = team_map[t_id]
+
+    # Получаем отсортированный список названий команд (как они должны быть в матрице)
+    sorted_matrix_names = []
+    for _, row in df_s.iterrows():
+        stats_name = row['Команда']
+        team_name = stats_name_to_team_name.get(stats_name)
+        if team_name:
+            sorted_matrix_names.append(team_name)
+
+    # Создаем матрицу с правильными названиями
+    matrix = pd.DataFrame("", index=sorted_matrix_names, columns=sorted_matrix_names)
+    for t in sorted_matrix_names:
+        matrix.loc[t, t] = "---"
 
     processed_games.clear()
     for game in cross_data:
         g_id = game.get('GameID')
         if g_id in processed_games: continue
         processed_games.add(g_id)
-        
+
         t1_name = team_map.get(game['Team1id'])
         t2_name = team_map.get(game['Team2id'])
-        
-        # Если имен нет в матрице (например, из-за молодежки), добавляем их на лету или скипаем
-        if not t1_name or not t2_name or t1_name not in matrix.index or t2_name not in matrix.index:
+
+        if not t1_name or not t2_name:
             continue
-            
+
         score = game['Score'] if game['WinTeam'] > 0 else f"({game['GameDate']})"
         h_flag = game.get('HomeTeam', 1)
-        
+
         # Записываем
         try:
             matrix.loc[t1_name, t2_name] = (matrix.loc[t1_name, t2_name] + "\n" + score + (" д" if h_flag == 1 else " г")).strip()
