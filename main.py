@@ -1,5 +1,7 @@
 import requests
+import sys
 from stats_parser import run_stats_calculation
+from game_tracker import build_game_charts
 
 def get_stages(root_id):
     headers = {
@@ -25,6 +27,20 @@ def get_stages(root_id):
         return []
 
 def main():
+    # Проверка аргументов командной строки для генерации графиков
+    if len(sys.argv) > 1 and sys.argv[1] == '--charts':
+        if len(sys.argv) > 2:
+            game_id = sys.argv[2]
+            print("=" * 40)
+            print("   BASKETBALL GAME CHARTS GENERATOR v1.0")
+            print("=" * 40)
+            build_game_charts(game_id)
+            return
+        else:
+            print("Использование: python main.py --charts <GAME_ID>")
+            print("Пример: python main.py --charts 1016417")
+            return
+
     print("="*40)
     print("   BASKETBALL STAGE SELECTOR v1.0")
     print("="*40)

@@ -7,6 +7,7 @@ from datetime import datetime
 from stats_parser import run_stats_calculation
 from match_parser import ultimate_match_parser
 from match_finder import find_recent_matches
+from game_tracker import build_game_charts
 
 # --- Настройки страницы ---
 st.set_page_config(
@@ -252,9 +253,17 @@ elif st.session_state.page == 'match':
     
     if default_game_id:
         st.success(f"✅ Выбран матч ID: `{default_game_id}` (из календаря)")
-    
+
     game_id = st.text_input("ID матча", placeholder="Например: 1016417", value=default_game_id, key="match_game_id")
-    
+
+    # Инициализируем состояние для графиков (сбрасываем при смене ID матча)
+    charts_key = f'charts_{game_id}'
+    if charts_key not in st.session_state:
+        st.session_state[charts_key] = False
+    if 'last_game_id' not in st.session_state or st.session_state.last_game_id != game_id:
+        st.session_state.last_game_id = game_id
+        st.session_state[charts_key] = False
+
     if st.button("▶ Парсить матч", key="parse_match_btn", type="primary"):
         if not game_id:
             st.warning("Введите ID матча")
@@ -262,14 +271,14 @@ elif st.session_state.page == 'match':
             with st.spinner("Парсинг матча..."):
                 players_file = f"match_{game_id}_players.csv"
                 teams_file = f"match_{game_id}_teams_total.csv"
-                
+
                 ultimate_match_parser(game_id)
-                
+
                 if os.path.exists(players_file):
                     st.success("✅ Матч распарсен успешно!")
-                    
+
                     col1, col2 = st.columns(2)
-                    
+
                     with col1:
                         with open(players_file, "rb") as f:
                             csv_data = f.read()
@@ -279,7 +288,7 @@ elif st.session_state.page == 'match':
                             file_name=players_file,
                             mime="text/csv"
                         )
-                    
+
                     with col2:
                         with open(teams_file, "rb") as f:
                             csv_data = f.read()
@@ -289,13 +298,67 @@ elif st.session_state.page == 'match':
                             file_name=teams_file,
                             mime="text/csv"
                         )
-                    
+
                     with st.expander("👁️ Топ-5 игроков по очкам", expanded=True):
                         df = pd.read_csv(players_file, encoding='utf-8-sig')
                         df_players = df[df['Роль'] == 'Игрок'].sort_values('Очки', ascending=False).head(5)
                         st.dataframe(df_players, hide_index=True)
                 else:
                     st.error("❌ Не удалось распарсить матч. Проверьте ID.")
+
+    # --- Блок визуализации графиков (вне условия парсинга) ---
+    # Показываем только если файлы матча существуют
+    players_file = f"match_{game_id}_players.csv" if game_id else None
+    if players_file and os.path.exists(players_file):
+        st.divider()
+        st.subheader("📈 Визуализация матча")
+        st.markdown("*Постройте графики прогрессии счёта и разницы в счёте*")
+
+        # Кнопка для построения графиков
+        if not st.session_state[charts_key]:
+            if st.button("📊 Построить графики", key="build_charts_btn", type="primary"):
+                with st.spinner("Генерация графиков..."):
+                    result = build_game_charts(game_id, verbose=False)
+
+                    if result:
+                        st.session_state[charts_key] = True
+                        st.success("✅ Графики построены!")
+                        st.rerun()
+                    else:
+                        st.error("❌ Не удалось построить графики. Возможно, нет данных о событиях матча.")
+        else:
+            # Отображение графиков
+            prog_file = f"match_{game_id}_progression.png"
+            diff_file = f"match_{game_id}_difference_solid.png"
+
+            if os.path.exists(prog_file):
+                st.image(prog_file, caption="Прогрессия счёта", use_container_width=True)
+
+                with open(prog_file, "rb") as f:
+                    st.download_button(
+                        label="📥 Скачать график прогрессии",
+                        data=f.read(),
+                        file_name=prog_file,
+                        mime="image/png",
+                        key="dl_prog"
+                    )
+
+            if os.path.exists(diff_file):
+                st.image(diff_file, caption="Разница в счёте (Lead Tracker)", use_container_width=True)
+
+                with open(diff_file, "rb") as f:
+                    st.download_button(
+                        label="📥 Скачать график разницы",
+                        data=f.read(),
+                        file_name=diff_file,
+                        mime="image/png",
+                        key="dl_diff"
+                    )
+
+            # Кнопка для сброса и повторной генерации
+            if st.button("🔄 Пересоздать графики", key="reset_charts_btn"):
+                st.session_state[charts_key] = False
+                st.rerun()
 
 # ==================== СТРАНИЦА: ТУРНИР ====================
 elif st.session_state.page == 'tournament':
