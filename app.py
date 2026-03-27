@@ -8,6 +8,7 @@ from stats_parser import run_stats_calculation
 from match_parser import ultimate_match_parser
 from match_finder import find_recent_matches
 from game_tracker import build_game_charts
+from foul_parser import parse_fouls, save_fouls_to_csv
 
 # --- Настройки страницы ---
 st.set_page_config(
@@ -256,6 +257,9 @@ elif st.session_state.page == 'match':
 
     game_id = st.text_input("ID матча", placeholder="Например: 1016417", value=default_game_id, key="match_game_id")
 
+    # Опция парсинга фолов
+    parse_fouls_option = st.checkbox("🟨 Распарсить фолы вместе с матчем", key="parse_fouls_checkbox")
+
     # Инициализируем состояние для графиков (сбрасываем при смене ID матча)
     charts_key = f'charts_{game_id}'
     if charts_key not in st.session_state:
@@ -271,8 +275,17 @@ elif st.session_state.page == 'match':
             with st.spinner("Парсинг матча..."):
                 players_file = f"match_{game_id}_players.csv"
                 teams_file = f"match_{game_id}_teams_total.csv"
+                fouls_file = f"match_{game_id}_fouls.csv"
 
                 ultimate_match_parser(game_id)
+                
+                # Парсим фолы если выбрано
+                fouls_df = None
+                if parse_fouls_option:
+                    with st.spinner("🟨 Парсинг фолов..."):
+                        fouls_df = parse_fouls(game_id, verbose=False)
+                        if fouls_df is not None:
+                            save_fouls_to_csv(fouls_df, game_id, verbose=False)
 
                 if os.path.exists(players_file):
                     st.success("✅ Матч распарсен успешно!")
@@ -303,8 +316,77 @@ elif st.session_state.page == 'match':
                         df = pd.read_csv(players_file, encoding='utf-8-sig')
                         df_players = df[df['Роль'] == 'Игрок'].sort_values('Очки', ascending=False).head(5)
                         st.dataframe(df_players, hide_index=True)
+                    
+                    # Блок фолов
+                    if parse_fouls_option and fouls_df is not None:
+                        st.divider()
+                        st.subheader("🟨 Фолы матча")
+                        
+                        # Показываем таблицу
+                        st.dataframe(fouls_df, hide_index=True, use_container_width=True)
+                        
+                        # Скачать CSV
+                        csv_data = fouls_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8')
+                        st.download_button(
+                            label="📥 Скачать фолы (CSV)",
+                            data=csv_data,
+                            file_name=fouls_file,
+                            mime="text/csv",
+                            key="download_fouls_btn"
+                        )
+                        
+                        # Статистика
+                        col_f1, col_f2 = st.columns(2)
+                        with col_f1:
+                            fouls_by_team = fouls_df['Команда'].value_counts()
+                            st.metric("Всего фолов", len(fouls_df))
+                        with col_f2:
+                            personal_fouls = len(fouls_df[fouls_df['Тип фола'].str.contains('Личный', na=False)])
+                            st.metric("Личных фолов", personal_fouls)
                 else:
                     st.error("❌ Не удалось распарсить матч. Проверьте ID.")
+
+    # --- Блок отдельного парсинга фолов ---
+    st.divider()
+    st.subheader("🟨 Отдельный парсинг фолов")
+    st.markdown("*Распарсить фолы для матча без основной статистики*")
+    
+    fouls_game_id = st.text_input("ID матча для фолов", placeholder="Например: 1016417", value=game_id if game_id else "", key="fouls_game_id")
+    
+    if st.button("🟨 Парсить только фолы", key="parse_fouls_only_btn"):
+        if not fouls_game_id:
+            st.warning("Введите ID матча")
+        else:
+            with st.spinner("🟨 Парсинг фолов..."):
+                fouls_df = parse_fouls(fouls_game_id, verbose=False)
+                
+                if fouls_df is not None:
+                    save_fouls_to_csv(fouls_df, fouls_game_id, verbose=False)
+                    st.success(f"✅ Найдено {len(fouls_df)} фолов!")
+                    
+                    # Таблица
+                    st.dataframe(fouls_df, hide_index=True, use_container_width=True)
+                    
+                    # Скачать CSV
+                    fouls_file = f"match_{fouls_game_id}_fouls.csv"
+                    csv_data = fouls_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8')
+                    st.download_button(
+                        label="📥 Скачать фолы (CSV)",
+                        data=csv_data,
+                        file_name=fouls_file,
+                        mime="text/csv",
+                        key="download_fouls_only_btn"
+                    )
+                    
+                    # Статистика
+                    col_f1, col_f2 = st.columns(2)
+                    with col_f1:
+                        st.metric("Всего фолов", len(fouls_df))
+                    with col_f2:
+                        personal_fouls = len(fouls_df[fouls_df['Тип фола'].str.contains('Личный', na=False)])
+                        st.metric("Личных фолов", personal_fouls)
+                else:
+                    st.error("❌ Не удалось распарсить фолы. Проверьте ID матча или наличие данных.")
 
     # --- Блок визуализации графиков (вне условия парсинга) ---
     # Показываем только если файлы матча существуют
@@ -492,9 +574,17 @@ elif st.session_state.page == 'about':
     **Матч:**
     - `match_*_players.csv` — статистика игроков
     - `match_*_teams_total.csv` — статистика команд
-    
+    - `match_*_fouls.csv` — все фолы матча (тип, время, игрок)
+
     **Календарь:**
     - `matches_list_*.csv` — список матчей за период
+
+    ### Функции
+    - 📅 **Календарь** — поиск матчей по периоду
+    - 🏀 **Матч** — детальная статистика игроков и команд + фолы
+    - 🟨 **Фолы** — парсинг всех фолов матча с классификацией (P, U, T, D, C, B, F)
+    - 📊 **Турнир** — турнирная таблица и шахматка результатов
+    - 📈 **Визуализация** — графики прогрессии счёта и разницы в счёте
     
     ### Технологии
     - Python 3.14
