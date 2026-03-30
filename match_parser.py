@@ -10,6 +10,212 @@ def safe_int(val):
         return int(val)
     except (ValueError, TypeError):
         return 0
+
+
+def get_match_summary(game_id):
+    """
+    Извлекает общую информацию о матче (Match Header) из JSON-ответа GetOnline.
+    
+    Args:
+        game_id: ID матча
+        
+    Returns:
+        dict с полями: tournament, datetime, location, spectators, score_final,
+                       score_periods, referees, commissioner, team_a, team_b
+        или None при ошибке
+    """
+    import re
+    from datetime import datetime as dt
+    
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://belarus.russiabasket.ru/'
+    }
+    
+    url = f"https://org.infobasket.su/Widget/GetOnline/{game_id}?format=json&lang=ru"
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+    except Exception as e:
+        print(f"[-] Ошибка при загрузке данных матча: {e}")
+        return None
+    
+    # === 1. Дата и время ===
+    online = data.get('Online', {})
+    
+    def parse_ms_date(val):
+        """Конвертирует /Date(1234567890000)/ в читаемую дату"""
+        if not val:
+            return None
+        match = re.search(r'/Date\((-?\d+)\)/', str(val))
+        if match:
+            ts = int(match.group(1)) / 1000
+            return dt.fromtimestamp(ts)
+        return None
+    
+    game_date_raw = online.get('GameDate', '')
+    game_time_raw = online.get('GameTime', '')
+    
+    # Парсим дату и время
+    game_date_dt = parse_ms_date(game_date_raw)
+    game_time_dt = parse_ms_date(game_time_raw)
+    
+    # Формируем строку
+    if game_date_dt and game_time_dt:
+        # Дата из GameDate, время из GameTime
+        datetime_str = f"{game_date_dt.strftime('%d.%m.%Y')} {game_time_dt.strftime('%H:%M')}"
+    elif game_date_dt:
+        datetime_str = game_date_dt.strftime('%d.%m.%Y %H:%M')
+    elif game_time_dt:
+        datetime_str = game_time_dt.strftime('%d.%m.%Y %H:%M')
+    else:
+        # Пробуем взять строковые значения как fallback
+        datetime_str = f"{str(game_date_raw)} {str(game_time_raw)}".strip()
+    
+    # === 2. Место проведения (город + арена) ===
+    arena = online.get('ArenaRu', '') or online.get('Venue1', '')
+    city = online.get('CityRu', '') or online.get('City', '')
+    
+    # Очищаем от лишних пробелов и запятых
+    if arena:
+        arena = str(arena).strip().rstrip(',').strip()
+    if city:
+        city = str(city).strip().rstrip(',').strip()
+    
+    if city and arena and city not in arena:
+        location = f"{city}, {arena}"
+    elif arena:
+        location = arena
+    elif city:
+        location = city
+    else:
+        location = "Не указано"
+    
+    # === 3. Зрители ===
+    attendance = online.get('Attendance')
+    if attendance is None or attendance == 0:
+        spectators = "Нет данных"
+    else:
+        spectators = str(attendance)
+    
+    # === 4. Турнир ===
+    # Берём с верхнего уровня data, а не из Online
+    comp_name = data.get('CompNameRu', '') or online.get('CompNameRu', '')
+    league_name = data.get('LeagueNameRu', '') or online.get('LeagueNameRu', '')
+    
+    if comp_name and league_name:
+        tournament = f"{league_name}, {comp_name}"
+    elif league_name:
+        tournament = league_name
+    elif comp_name:
+        tournament = comp_name
+    else:
+        tournament = "Не указано"
+    
+    # === 5. Команды (из OnlineTeams) ===
+    team_a = "Команда 1"
+    team_b = "Команда 2"
+    team_a_id = None
+    team_b_id = None
+    
+    for ot in data.get('OnlineTeams', []):
+        team_num = ot.get('TeamNumber')
+        team_name = (ot.get('TeamName2') or ot.get('TeamName1') or '').strip()
+        team_city = ot.get('TeamCityRu', '') or ot.get('TeamRegionNameRu', '')
+        full_name = f"{team_name} ({team_city})" if team_city else team_name
+        
+        if team_num == 1:
+            team_a = full_name if full_name else "Команда 1"
+            team_a_id = ot.get('TeamID')
+        elif team_num == 2:
+            team_b = full_name if full_name else "Команда 2"
+            team_b_id = ot.get('TeamID')
+    
+    # === 6. Итоговый счёт ===
+    # Сначала пробуем взять из Online (для LIVE матчей)
+    score_a = online.get('ScoreA')
+    score_b = online.get('ScoreB')
+    
+    # Если нет, берём из GameTeams (для завершённых матчей)
+    if score_a is None or score_b is None:
+        game_teams = data.get('GameTeams', [])
+        if game_teams:
+            # Ищем команду 1 и команду 2
+            for gt in game_teams:
+                if gt.get('TeamNumber') == 1:
+                    score_a = gt.get('Score', 0)
+                elif gt.get('TeamNumber') == 2:
+                    score_b = gt.get('Score', 0)
+    
+    score_a = score_a or 0
+    score_b = score_b or 0
+    score_final = f"{score_a}:{score_b}"
+
+    # === 7. Счёт по периодам ===
+    periods_parts = []
+    for period in data.get('OnlinePeriods', []):
+        # Пробуем разные варианты имён полей
+        p_num = period.get('PeriodNumber') or period.get('Period') or 0
+        p_score_a = period.get('ScoreA') or period.get('Team1Score') or 0
+        p_score_b = period.get('ScoreB') or period.get('Team2Score') or 0
+        
+        # Если есть ScoreA и ScoreB — добавляем период
+        if p_num > 0 and (p_score_a or p_score_b):
+            periods_parts.append(f"{p_score_a}:{p_score_b}")
+    
+    # Если OnlinePeriods пуст, пробуем взять из GameTeams[].Periods
+    if not periods_parts:
+        game_teams = data.get('GameTeams', [])
+        if len(game_teams) >= 2:
+            periods_a = {p.get('Period'): p.get('Score') for p in game_teams[0].get('Periods', []) if p.get('Period')}
+            periods_b = {p.get('Period'): p.get('Score') for p in game_teams[1].get('Periods', []) if p.get('Period')}
+            
+            all_periods = sorted(set(periods_a.keys()) | set(periods_b.keys()))
+            for p_num in all_periods:
+                s_a = periods_a.get(p_num, 0)
+                s_b = periods_b.get(p_num, 0)
+                periods_parts.append(f"{s_a}:{s_b}")
+
+    score_periods = ", ".join(periods_parts) if periods_parts else "—"
+    
+    # === 8. Судейская бригада (из OnlineStarts, StartType == 4) ===
+    referees_list = []
+    commissioner = None
+    
+    for start in data.get('OnlineStarts', []):
+        if start.get('StartType') != 4:
+            continue
+        
+        person_name = (start.get('PersonName2') or start.get('PersonName1') or '').strip()
+        pos_id = start.get('PosID', 0)
+        
+        if pos_id in [101, 102, 103]:
+            if person_name:
+                referees_list.append(person_name)
+        elif pos_id == 104:
+            if person_name:
+                commissioner = person_name
+    
+    referees_str = ", ".join(referees_list) if referees_list else "Не назначены"
+    commissioner_str = commissioner if commissioner else "Не назначен"
+
+    return {
+        "tournament": tournament,
+        "datetime": datetime_str,
+        "location": location,
+        "spectators": spectators,
+        "score_final": score_final,
+        "score_periods": score_periods,
+        "referees": referees_str,
+        "commissioner": commissioner_str,
+        "team_a": team_a,
+        "team_b": team_b,
+        "team_a_id": team_a_id,
+        "team_b_id": team_b_id,
+        "game_status": data.get('GameStatus', 0)  # 0=запланирован, 1=завершён, 2=live
+    }
     
 def safe_split_shots(val):
     """Разбивает строку типа '3/8' на попадания и попытки"""

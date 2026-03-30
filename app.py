@@ -5,10 +5,193 @@ import os
 from datetime import datetime
 
 from stats_parser import run_stats_calculation
-from match_parser import ultimate_match_parser
+from match_parser import ultimate_match_parser, get_match_summary
 from match_finder import find_recent_matches
 from game_tracker import build_game_charts
 from foul_parser import parse_fouls, save_fouls_to_csv
+import streamlit.components.v1 as components
+
+
+def render_match_header(summary: dict) -> None:
+    """
+    Отображает блок с мета-данными матча (Match Header).
+
+    Args:
+        summary: Словарь с данными матча от get_match_summary()
+    """
+    if not summary:
+        return
+
+    team_a = summary.get('team_a', 'Команда 1')
+    team_b = summary.get('team_b', 'Команда 2')
+    score_final = summary.get('score_final', '0:0')
+    score_periods = summary.get('score_periods', '—')
+    tournament = summary.get('tournament', '')
+    datetime_str = summary.get('datetime', '')
+    location = summary.get('location', '')
+    spectators = summary.get('spectators', '')
+    referees = summary.get('referees', '')
+    commissioner = summary.get('commissioner', '')
+    game_status = summary.get('game_status', 0)
+
+    # Статус матча
+    if game_status == 2:
+        status_badge = '<span class="match-status-live">LIVE</span>'
+    elif game_status == 0:
+        status_badge = '<span class="match-status-scheduled">Запланирован</span>'
+    else:
+        status_badge = ''
+
+    html = f'''
+    <style>
+        .match-header {{
+            background: linear-gradient(135deg, #1e1e1e 0%, #2d2d2d 100%);
+            border-radius: 1rem;
+            padding: 1.5rem;
+            margin: 1rem 0;
+            border: 1px solid #444;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }}
+        .match-tournament {{
+            text-align: center;
+            color: #888;
+            font-size: 0.85rem;
+            margin-bottom: 0.5rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }}
+        .match-datetime {{
+            text-align: center;
+            color: #666;
+            font-size: 0.75rem;
+            margin-bottom: 1rem;
+        }}
+        .match-teams-container {{
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }}
+        .match-team {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            flex: 1;
+            max-width: 220px;
+        }}
+        .match-team-name {{
+            text-align: center;
+            font-weight: bold;
+            font-size: 0.9rem;
+            color: #fff;
+            line-height: 1.2;
+        }}
+        .match-score-container {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 0 1rem;
+        }}
+        .match-score-final {{
+            font-size: 3rem;
+            font-weight: bold;
+            color: #FF4B4B;
+            line-height: 1;
+        }}
+        .match-score-periods {{
+            font-size: 0.75rem;
+            color: #888;
+            margin-top: 0.5rem;
+            white-space: nowrap;
+        }}
+        .match-status-live {{
+            background-color: #cc0000;
+            color: white;
+            padding: 0.2rem 0.6rem;
+            border-radius: 0.3rem;
+            font-size: 0.7rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+            display: inline-block;
+            animation: pulse 2s infinite;
+        }}
+        .match-status-scheduled {{
+            background-color: #555;
+            color: #ccc;
+            padding: 0.2rem 0.6rem;
+            border-radius: 0.3rem;
+            font-size: 0.7rem;
+            font-weight: bold;
+            margin-bottom: 0.5rem;
+            display: inline-block;
+        }}
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; }}
+            50% {{ opacity: 0.6; }}
+        }}
+        .match-location {{
+            text-align: center;
+            color: #777;
+            font-size: 0.8rem;
+            margin-bottom: 0.3rem;
+        }}
+        .match-spectators {{
+            text-align: center;
+            color: #777;
+            font-size: 0.75rem;
+            margin-bottom: 1rem;
+        }}
+        .match-officials {{
+            border-top: 1px solid #444;
+            padding-top: 0.8rem;
+            margin-top: 0.8rem;
+        }}
+        .match-referees {{
+            text-align: center;
+            color: #4CAF50;
+            font-size: 0.8rem;
+            margin-bottom: 0.3rem;
+        }}
+        .match-commissioner {{
+            text-align: center;
+            color: #888;
+            font-size: 0.75rem;
+        }}
+    </style>
+    
+    <div class="match-header">
+        <div class="match-tournament">{tournament}</div>
+        <div class="match-datetime">{datetime_str}</div>
+
+        {status_badge}
+
+        <div class="match-teams-container">
+            <div class="match-team">
+                <div class="match-team-name">{team_a}</div>
+            </div>
+
+            <div class="match-score-container">
+                <div class="match-score-final">{score_final}</div>
+                <div class="match-score-periods">{score_periods}</div>
+            </div>
+
+            <div class="match-team">
+                <div class="match-team-name">{team_b}</div>
+            </div>
+        </div>
+
+        <div class="match-location">📍 {location}</div>
+        <div class="match-spectators">👥 Зрители: {spectators}</div>
+
+        <div class="match-officials">
+            <div class="match-referees">⚖️ Судьи: {referees}</div>
+            <div class="match-commissioner">📋 Комиссар: {commissioner}</div>
+        </div>
+    </div>
+    '''
+
+    components.html(html, height=320)
 
 # --- Настройки страницы ---
 st.set_page_config(
@@ -28,7 +211,7 @@ st.markdown("""
         margin-bottom: 1rem;
         flex-wrap: wrap;
     }
-    
+
     /* Адаптив для мобильных */
     @media (max-width: 768px) {
         .nav-container {
@@ -42,7 +225,7 @@ st.markdown("""
             width: 100%;
         }
     }
-    
+
     /* Для десктопа - в ряд */
     @media (min-width: 769px) {
         .nav-container {
@@ -53,7 +236,7 @@ st.markdown("""
             min-width: 140px;
         }
     }
-    
+
     .stButton > button {
         background-color: #f0f0f0;
         color: #333;
@@ -68,7 +251,7 @@ st.markdown("""
         border-color: #FF4B4B;
         transform: translateY(-2px);
     }
-    
+
     /* Активная кнопка */
     .stButton:has(button[data-baseweb="base-button"]) > button.active {
         background-color: #FF4B4B !important;
@@ -248,14 +431,26 @@ if st.session_state.page == 'calendar':
 elif st.session_state.page == 'match':
     st.title("🏀 Парсинг матча")
     st.markdown("*Детальная статистика игроков и команд*")
-    
+
     # Если ID матча был выбран в календаре — подставляем его
     default_game_id = st.session_state.get('selected_game_id', "")
-    
+
     if default_game_id:
         st.success(f"✅ Выбран матч ID: `{default_game_id}` (из календаря)")
 
     game_id = st.text_input("ID матча", placeholder="Например: 1016417", value=default_game_id, key="match_game_id")
+
+    # === Блок Match Header (мета-данные матча) ===
+    if game_id:
+        with st.spinner("Загрузка данных о матче..."):
+            match_summary = get_match_summary(game_id)
+        
+        if match_summary:
+            render_match_header(match_summary)
+        else:
+            st.warning("⚠️ Не удалось загрузить данные о матче. Проверьте ID.")
+        
+        st.divider()
 
     # Опция парсинга фолов
     parse_fouls_option = st.checkbox("🟨 Распарсить фолы вместе с матчем", key="parse_fouls_checkbox")
