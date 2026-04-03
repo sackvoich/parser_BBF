@@ -155,16 +155,16 @@ def get_match_summary(game_id):
 
     # === 7. Счёт по периодам ===
     periods_parts = []
+    
+    # Сначала пробуем взять из OnlinePeriods (если там есть ScoreA/ScoreB)
     for period in data.get('OnlinePeriods', []):
-        # Пробуем разные варианты имён полей
         p_num = period.get('PeriodNumber') or period.get('Period') or 0
         p_score_a = period.get('ScoreA') or period.get('Team1Score') or 0
         p_score_b = period.get('ScoreB') or period.get('Team2Score') or 0
         
-        # Если есть ScoreA и ScoreB — добавляем период
         if p_num > 0 and (p_score_a or p_score_b):
             periods_parts.append(f"{p_score_a}:{p_score_b}")
-    
+
     # Если OnlinePeriods пуст, пробуем взять из GameTeams[].Periods
     if not periods_parts:
         game_teams = data.get('GameTeams', [])
@@ -177,6 +177,60 @@ def get_match_summary(game_id):
                 s_a = periods_a.get(p_num, 0)
                 s_b = periods_b.get(p_num, 0)
                 periods_parts.append(f"{s_a}:{s_b}")
+
+    # Если всё ещё нет, восстанавливаем из OnlinePlays
+    if not periods_parts:
+        online_plays = data.get('OnlinePlays', [])
+        if online_plays:
+            # Словарь: номер периода -> [накопительный_счёт_a, накопительный_счёт_b]
+            period_cumulative = {}
+            
+            # Маппинг StartID -> TeamNumber
+            starts_map = {}
+            for s in data.get('OnlineStarts', []):
+                if s.get('StartType') in [1, 2, 3]:  # Игроки
+                    starts_map[s['StartID']] = s.get('TeamNumber', 0)
+            
+            curr_a, curr_b = 0, 0
+            last_period = 1
+            
+            # Сортируем события по времени
+            sorted_plays = sorted(online_plays, key=lambda x: (x.get('PlayPeriod', 0), x.get('PlaySecond', 0)))
+            
+            for play in sorted_plays:
+                if play.get('SysStatus') != 1:
+                    continue
+                    
+                play_type = play.get('PlayTypeID', 0)
+                period = play.get('PlayPeriod', 1)
+                
+                # При смене периода сохраняем накопительный счёт на конец периода
+                if period > last_period and last_period > 0:
+                    if last_period not in period_cumulative:
+                        period_cumulative[last_period] = [curr_a, curr_b]
+                    last_period = period
+                
+                # Проверяем, было ли это взятие очков (type 1, 2, 3)
+                if play_type in [1, 2, 3]:
+                    start_id = play.get('StartID', 0)
+                    team_num = starts_map.get(start_id, 0)
+                    
+                    if team_num == 1:
+                        curr_a += play_type
+                    elif team_num == 2:
+                        curr_b += play_type
+            
+            # Сохраняем счёт последнего периода (финальный счёт)
+            if last_period not in period_cumulative:
+                period_cumulative[last_period] = [curr_a, curr_b]
+            
+            # Вычисляем счёт за каждый период (разница между периодами)
+            prev_a, prev_b = 0, 0
+            for p_num in sorted(period_cumulative.keys()):
+                s_a = period_cumulative[p_num][0] - prev_a
+                s_b = period_cumulative[p_num][1] - prev_b
+                periods_parts.append(f"{s_a}:{s_b}")
+                prev_a, prev_b = period_cumulative[p_num][0], period_cumulative[p_num][1]
 
     score_periods = ", ".join(periods_parts) if periods_parts else "—"
     
@@ -267,6 +321,12 @@ def ultimate_match_parser(game_id):
 
 def parse_from_log(events, roster_data, teams_map):
     participants = {}
+    # Собираем стартовую пятёрку из OnlineStarts (StartType == 1)
+    starters = set()
+    for start in roster_data.get('OnlineStarts', []):
+        if start.get('StartType') == 1:
+            starters.add(start['StartID'])
+
     for start in roster_data.get('OnlineStarts', []):
         s_id = start['StartID']
         if s_id == 0 or start['StartType'] == 4: continue
@@ -276,7 +336,9 @@ def parse_from_log(events, roster_data, teams_map):
             'Team': teams_map.get(start['TeamNumber'], "Unknown"),
             'TNum': start['TeamNumber'],
             'Role': 'Игрок' if start['StartType'] == 1 else 'Тренер',
-            'Stats': create_stats_obj(), 'last_in': None
+            'Stats': create_stats_obj(),
+            'IsStarter': s_id in starters,
+            'last_in': None
         }
 
     team_entities = {1: {'Name': 'КОМАНДА', 'Stats': create_stats_obj()}, 2: {'Name': 'КОМАНДА', 'Stats': create_stats_obj()}}
@@ -311,14 +373,14 @@ def parse_from_log(events, roster_data, teams_map):
         elif 40 <= type_id <= 46: st['PF']+=1
         elif 50 <= type_id <= 54: st['FC']+=1
 
-    p_rows = [format_row(p, p['Name'], p['Role'], p['Team'], p['No']) for p in participants.values()]
+    p_rows = [format_row(p, p['Name'], p['Role'], p['Team'], p['No'], p.get('IsStarter', False)) for p in participants.values()]
     t_rows = []
     for tn in [1, 2]:
         team_p_stats = [p['Stats'] for p in participants.values() if p['TNum'] == tn]
         total_st = create_stats_obj()
         for s in team_p_stats + [team_entities[tn]['Stats']]:
             for k in total_st: total_st[k] += s[k]
-        t_rows.append(format_row({'Stats': total_st}, "ИТОГО", "TEAM", teams_map[tn], ""))
+        t_rows.append(format_row({'Stats': total_st}, "ИТОГО", "TEAM", teams_map[tn], "", False))
     return pd.DataFrame(p_rows), pd.DataFrame(t_rows)
 
 def parse_from_final_json(data, teams_map):
@@ -346,7 +408,7 @@ def parse_from_final_json(data, teams_map):
 def create_stats_obj():
     return {'Pts':0, '2PM':0, '2PA':0, '3PM':0, '3PA':0, 'FTM':0, 'FTA':0, 'ORB':0, 'DRB':0, 'AST':0, 'STL':0, 'TOV':0, 'BLK':0, 'PF':0, 'FC':0, 'PM':0, 'Secs':0}
 
-def format_row(p, name, role, team, no):
+def format_row(p, name, role, team, no, is_starter=False):
     s = p['Stats']
     pts, orb, drb = safe_int(s.get('Pts')), safe_int(s.get('ORB')), safe_int(s.get('DRB'))
     ast, stl, blk, tov, pf, fs = safe_int(s.get('AST')), safe_int(s.get('STL')), safe_int(s.get('BLK')), safe_int(s.get('TOV')), safe_int(s.get('PF')), safe_int(s.get('FC'))
@@ -355,7 +417,8 @@ def format_row(p, name, role, team, no):
     eff = (pts + (orb + drb) + ast + stl + blk + fs) - (max(0, m_fg) + max(0, m_ft) + tov + pf)
     return {
         'Команда': team, 'Имя': name, '№': no, 'Роль': role,
-        'Мин': f"{safe_int(s.get('Secs'))//60:02d}:{safe_int(s.get('Secs'))%60:02d}", 
+        'Старт': '+' if is_starter else '-',
+        'Мин': f"{safe_int(s.get('Secs'))//60:02d}:{safe_int(s.get('Secs'))%60:02d}",
         'Очки': pts, '2-очк': f"{s.get('2PM')}/{s.get('2PA')}", '3-очк': f"{s.get('3PM')}/{s.get('3PA')}",
         'ШБ': f"{s.get('FTM')}/{s.get('FTA')}", 'Подборы (O/D/T)': f"{orb}/{drb}/{orb+drb}",
         'ГП': ast, 'ПХ': stl, 'ПТ': tov, 'БШ': blk, 'Ф': pf, 'ФС': fs, '+/-': safe_int(s.get('PM')), 'КПИ': eff
@@ -370,9 +433,13 @@ def map_final_json_row(p, team, role):
     m_fg = (a2 + a3) - (m2 + m3)
     m_ft = a1 - m1
     eff = (pts + trb + ast + stl + blk + fs) - (max(0, m_fg) + max(0, m_ft) + tov + pf)
+    is_starter = p.get('IsStart', False) or p.get('StartMark') == '+'
+    starter_mark = '+' if is_starter else '-'
     return {
         'Команда': team, 'Имя': f"{p.get('LastNameRu', '')} {p.get('FirstNameRu', '')}".strip(),
-        '№': p.get('PlayerNumber', ''), 'Роль': role, 'Мин': p.get('PlayedTime', '0:00'),
+        '№': p.get('PlayerNumber', ''), 'Роль': role,
+        'Старт': starter_mark,
+        'Мин': p.get('PlayedTime', '0:00'),
         'Очки': pts, '2-очк': p.get('Shots2', '0/0'), '3-очк': p.get('Shots3', '0/0'), 'ШБ': p.get('Shots1', '0/0'),
         'Подборы (O/D/T)': f"{safe_int(p.get('OffRebound'))}/{safe_int(p.get('DefRebound'))}/{trb}",
         'ГП': ast, 'ПХ': stl, 'ПТ': tov, 'БШ': blk, 'Ф': pf, 'ФС': fs, '+/-': safe_int(p.get('PlusMinus')), 'КПИ': eff

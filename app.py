@@ -191,7 +191,7 @@ def render_match_header(summary: dict) -> None:
     </div>
     '''
 
-    components.html(html, height=320)
+    components.html(html, height=340)
 
 # --- Настройки страницы ---
 st.set_page_config(
