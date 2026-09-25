@@ -9,6 +9,7 @@ from match_parser import ultimate_match_parser, get_match_summary
 from match_finder import find_recent_matches
 from game_tracker import build_game_charts
 from foul_parser import parse_fouls, save_fouls_to_csv
+from team_parser import parse_team, save_team_to_csv, get_team_seasons
 import streamlit.components.v1 as components
 
 
@@ -274,7 +275,7 @@ def set_page(page_name):
 
 # Адаптивная навигация
 st.markdown('<div class="nav-container">', unsafe_allow_html=True)
-col_nav1, col_nav2, col_nav3, col_nav4 = st.columns(4)
+col_nav1, col_nav2, col_nav3, col_nav4, col_nav5 = st.columns(5)
 with col_nav1:
     if st.button("📅 Календарь", key="nav_calendar", width="stretch", type="primary" if st.session_state.page == 'calendar' else "secondary"):
         set_page('calendar')
@@ -284,10 +285,14 @@ with col_nav2:
         set_page('match')
         st.rerun()
 with col_nav3:
+    if st.button("👥 Команда", key="nav_team", width="stretch", type="primary" if st.session_state.page == 'team' else "secondary"):
+        set_page('team')
+        st.rerun()
+with col_nav4:
     if st.button("📊 Турнир", key="nav_tournament", width="stretch", type="primary" if st.session_state.page == 'tournament' else "secondary"):
         set_page('tournament')
         st.rerun()
-with col_nav4:
+with col_nav5:
     if st.button("ℹ️ О проекте", key="nav_about", width="stretch", type="primary" if st.session_state.page == 'about' else "secondary"):
         set_page('about')
         st.rerun()
@@ -637,6 +642,155 @@ elif st.session_state.page == 'match':
                 st.session_state[charts_key] = False
                 st.rerun()
 
+# ==================== СТРАНИЦА: КОМАНДА ====================
+elif st.session_state.page == 'team':
+    st.title("👥 Парсинг команды")
+    st.markdown("*Ростер, статистика игроков за сезон и тренерский штаб*")
+
+    team_id = st.text_input("ID команды", placeholder="Например: 25724", value="", key="team_id_input")
+
+    # Подсказка: как найти ID команды
+    with st.expander("💡 Как найти ID команды?"):
+        st.markdown("""
+        ID команды можно получить из турнирной таблицы:
+        1. Перейдите на вкладку **📊 Турнир**
+        2. Спарсите турнир — ID команд есть в ответе API `Widget/CompTeamResults`
+        
+        Или из URL страницы команды на сайте, например:
+        `belarus.russiabasket.ru/team/25724` → ID = **25724**
+        """)
+
+    # Загружаем сезоны команды
+    seasons = None
+    if team_id:
+        with st.spinner("Загрузка сезонов команды..."):
+            seasons = get_team_seasons(team_id)
+        if seasons is None:
+            st.error("❌ Не удалось загрузить сезоны. Проверьте ID команды.")
+
+    # Выбор сезона
+    selected_season_id = None
+    if seasons:
+        season_options = {f"{s.get('SeasonName', 'Сезон')} (ID: {s['CompID']})": s['CompID'] for s in seasons}
+        selected_label = st.selectbox(
+            "Сезон (по умолчанию — последний):",
+            options=["Последний доступный"] + list(season_options.keys()),
+            key="team_season_select"
+        )
+        if selected_label != "Последний доступный":
+            selected_season_id = season_options[selected_label]
+
+    min_games = st.slider(
+        "Минимум игр, чтобы не подтягивать прошлый сезон:",
+        min_value=0, max_value=20, value=5, key="team_min_games"
+    )
+
+    if st.button("▶ Парсить команду", key="parse_team_btn", type="primary"):
+        if not team_id:
+            st.warning("Введите ID команды")
+        else:
+            with st.spinner("Парсинг команды..."):
+                result = parse_team(team_id, season_id=selected_season_id, min_games=min_games, verbose=False)
+
+            if result is None:
+                st.error("❌ Не удалось распарсить команду. Проверьте ID.")
+            else:
+                st.session_state.team_result = result
+                st.session_state.team_result_key = f"{team_id}_{selected_season_id}_{min_games}"
+                st.success(f"✅ Команда **{result['team_name']}** распарсена!")
+
+    # Отображение результатов
+    if 'team_result' in st.session_state and st.session_state.get('team_result_key') == f"{team_id}_{selected_season_id}_{min_games}":
+        result = st.session_state.team_result
+
+        # Заголовок команды
+        st.divider()
+        st.header(f"🏀 {result['team_name']}")
+        st.markdown(f"**Сезон:** {result['season_name']} | **Турнир:** {result['comp_name']}")
+
+        # Метрики
+        col_m1, col_m2, col_m3 = st.columns(3)
+        with col_m1:
+            st.metric("Игроков в ростере", len(result['roster_df']))
+        with col_m2:
+            st.metric("Тренеров и персонала", len(result['coaches_df']))
+        with col_m3:
+            games = result['current']['stats'].get('GameCount') or 0
+            st.metric("Игр в турнире", games)
+
+        # === Ростер ===
+        st.subheader("📋 Состав (ростер)")
+        if not result['roster_df'].empty:
+            st.dataframe(result['roster_df'], hide_index=True, width='stretch')
+            csv_data = result['roster_df'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8')
+            st.download_button(
+                label="📥 Скачать ростер (CSV)",
+                data=csv_data,
+                file_name=f"team_{result['team_id']}_roster.csv",
+                mime="text/csv",
+                key="dl_team_roster"
+            )
+        else:
+            st.info("Ростер пуст")
+
+        # === Тренеры ===
+        st.subheader("🧑‍🏫 Тренеры и персонал")
+        if not result['coaches_df'].empty:
+            st.dataframe(result['coaches_df'], hide_index=True, width='stretch')
+            csv_data = result['coaches_df'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8')
+            st.download_button(
+                label="📥 Скачать тренеров (CSV)",
+                data=csv_data,
+                file_name=f"team_{result['team_id']}_coaches.csv",
+                mime="text/csv",
+                key="dl_team_coaches"
+            )
+        else:
+            st.info("Тренеры не найдены")
+
+        # === Статистика текущего сезона ===
+        st.subheader(f"📈 Статистика игроков — {result['comp_name']}")
+        if not result['stats_df'].empty:
+            st.dataframe(result['stats_df'], hide_index=True, width='stretch')
+            cur_comp = result['current']['comp']['CompID']
+            csv_data = result['stats_df'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8')
+            st.download_button(
+                label="📥 Скачать статистику (CSV)",
+                data=csv_data,
+                file_name=f"team_{result['team_id']}_stats_{cur_comp}.csv",
+                mime="text/csv",
+                key="dl_team_stats"
+            )
+        else:
+            st.info("Статистики за этот сезон пока нет")
+
+        # === Статистика прошлого сезона (если подтянута) ===
+        if result['previous'] is not None:
+            st.subheader(f"📈 Статистика игроков — {result['prev_comp_name']} ({result['prev_season_name']})")
+            st.caption("Подтянуто автоматически: в выбранном сезоне статистики мало")
+            if result['stats_prev_df'] is not None and not result['stats_prev_df'].empty:
+                st.dataframe(result['stats_prev_df'], hide_index=True, width='stretch')
+                prev_comp = result['previous']['comp']['CompID']
+                csv_data = result['stats_prev_df'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8')
+                st.download_button(
+                    label="📥 Скачать статистику прошлого сезона (CSV)",
+                    data=csv_data,
+                    file_name=f"team_{result['team_id']}_stats_{prev_comp}.csv",
+                    mime="text/csv",
+                    key="dl_team_stats_prev"
+                )
+            else:
+                st.info("Статистики за прошлый сезон нет")
+
+        # === Скачать всё сразу ===
+        st.divider()
+        if st.button("💾 Сохранить все CSV-файлы", key="save_team_csv_btn"):
+            files = save_team_to_csv(result, verbose=False)
+            if files:
+                st.success(f"✅ Сохранено файлов: {len(files)} — {', '.join(files)}")
+            else:
+                st.warning("Нет данных для сохранения")
+
 # ==================== СТРАНИЦА: ТУРНИР ====================
 elif st.session_state.page == 'tournament':
     st.title("📊 Парсинг турнира")
@@ -759,6 +913,10 @@ elif st.session_state.page == 'about':
     | `Comp/GetCalendarCarousel/` | Календарь матчей |
     | `Widget/GetOnline/{game_id}` | Протокол матча |
     | `Api/GetOnlinePlays/{game_id}` | Play-by-play лог событий |
+    | `Widget/GetTeamSeasons/{team_id}` | Сезоны команды |
+    | `Widget/GetTeamComps/{team_id}` | Турниры команды в сезоне |
+    | `Widget/TeamRoster/{team_id}` | Ростер команды (игроки, тренеры) |
+    | `Widget/TeamStats/{team_id}` | Статистика игроков за турнир |
     
     ### Выходные файлы
     
@@ -774,10 +932,16 @@ elif st.session_state.page == 'about':
     **Календарь:**
     - `matches_list_*.csv` — список матчей за период
 
+    **Команда:**
+    - `team_*_roster.csv` — ростер команды (игроки)
+    - `team_*_coaches.csv` — тренеры и персонал
+    - `team_*_stats_*.csv` — статистика игроков за сезон
+
     ### Функции
     - 📅 **Календарь** — поиск матчей по периоду
     - 🏀 **Матч** — детальная статистика игроков и команд + фолы
     - 🟨 **Фолы** — парсинг всех фолов матча с классификацией (P, U, T, D, C, B, F)
+    - 👥 **Команда** — ростер, тренеры и статистика игроков за сезон (с автоподтягиванием прошлого сезона)
     - 📊 **Турнир** — турнирная таблица и шахматка результатов
     - 📈 **Визуализация** — графики прогрессии счёта и разницы в счёте
     
