@@ -10,6 +10,7 @@ from match_finder import find_recent_matches
 from game_tracker import build_game_charts
 from foul_parser import parse_fouls, save_fouls_to_csv
 from team_parser import parse_team, save_team_to_csv, get_team_seasons
+from pbp_parser import parse_play_by_play, build_summary_df, save_summary_to_csv, save_pbp_to_csv
 import streamlit.components.v1 as components
 
 
@@ -460,6 +461,9 @@ elif st.session_state.page == 'match':
     # Опция парсинга фолов
     parse_fouls_option = st.checkbox("🟨 Распарсить фолы вместе с матчем", key="parse_fouls_checkbox")
 
+    # Опция парсинга play-by-play
+    parse_pbp_option = st.checkbox("📝 Распарсить play-by-play вместе с матчем", key="parse_pbp_checkbox")
+
     # Инициализируем состояние для графиков (сбрасываем при смене ID матча)
     charts_key = f'charts_{game_id}'
     if charts_key not in st.session_state:
@@ -476,8 +480,14 @@ elif st.session_state.page == 'match':
                 players_file = f"match_{game_id}_players.csv"
                 teams_file = f"match_{game_id}_teams_total.csv"
                 fouls_file = f"match_{game_id}_fouls.csv"
+                info_file = f"match_{game_id}_info.csv"
+                pbp_file = f"match_{game_id}_pbp.csv"
 
                 ultimate_match_parser(game_id)
+
+                # Основная информация матча -> CSV
+                summary_df = build_summary_df(game_id, match_summary if match_summary else None)
+                save_summary_to_csv(summary_df, game_id, verbose=False)
                 
                 # Парсим фолы если выбрано
                 fouls_df = None
@@ -487,30 +497,52 @@ elif st.session_state.page == 'match':
                         if fouls_df is not None:
                             save_fouls_to_csv(fouls_df, game_id, verbose=False)
 
+                # Play-by-play если выбрано
+                pbp_df = None
+                if parse_pbp_option:
+                    with st.spinner("📝 Парсинг play-by-play..."):
+                        pbp_df = parse_play_by_play(game_id, verbose=False)
+                        if pbp_df is not None:
+                            save_pbp_to_csv(pbp_df, game_id, verbose=False)
+
                 if os.path.exists(players_file):
                     st.success("✅ Матч распарсен успешно!")
 
-                    col1, col2 = st.columns(2)
+                    col1, col2, col3 = st.columns(3)
 
                     with col1:
                         with open(players_file, "rb") as f:
                             csv_data = f.read()
                         st.download_button(
-                            label="📥 Скачать статистику игроков",
+                            label="📥 Игроки",
                             data=csv_data,
                             file_name=players_file,
-                            mime="text/csv"
+                            mime="text/csv",
+                            key="dl_players_main"
                         )
 
                     with col2:
                         with open(teams_file, "rb") as f:
                             csv_data = f.read()
                         st.download_button(
-                            label="📥 Скачать статистику команд",
+                            label="📥 Команды",
                             data=csv_data,
                             file_name=teams_file,
-                            mime="text/csv"
+                            mime="text/csv",
+                            key="dl_teams_main"
                         )
+
+                    with col3:
+                        if os.path.exists(info_file):
+                            with open(info_file, "rb") as f:
+                                csv_data = f.read()
+                            st.download_button(
+                                label="📥 Инфо о матче",
+                                data=csv_data,
+                                file_name=info_file,
+                                mime="text/csv",
+                                key="dl_info_main"
+                            )
 
                     with st.expander("👁️ Топ-5 игроков по очкам", expanded=True):
                         df = pd.read_csv(players_file, encoding='utf-8-sig')
@@ -543,6 +575,61 @@ elif st.session_state.page == 'match':
                         with col_f2:
                             personal_fouls = len(fouls_df[fouls_df['Тип фола'].str.contains('Личный', na=False)])
                             st.metric("Личных фолов", personal_fouls)
+
+                    # Блок play-by-play
+                    if parse_pbp_option and pbp_df is not None:
+                        st.divider()
+                        st.subheader("📝 Play-by-play протокол")
+
+                        # Метрики
+                        col_p1, col_p2, col_p3 = st.columns(3)
+                        with col_p1:
+                            st.metric("Событий всего", len(pbp_df))
+                        with col_p2:
+                            scored = pbp_df[pbp_df['Событие'].str.contains('забит', na=False)]
+                            st.metric("Результативных бросков", len(scored))
+                        with col_p3:
+                            lead_changes = (pbp_df['Счёт'].str.split(':').apply(lambda x: int(x[0]) - int(x[1]) if len(x) == 2 else 0) != 0).sum()
+                            st.metric("Моментов лидерства", lead_changes)
+
+                        # Фильтры
+                        st.markdown("**Фильтры по протоколу:**")
+                        fc_col1, fc_col2 = st.columns(2)
+                        with fc_col1:
+                            period_filter = st.multiselect(
+                                "Период:",
+                                options=pbp_df['Период'].unique().tolist(),
+                                default=[],
+                                key="pbp_period_filter"
+                            )
+                        with fc_col2:
+                            event_types = pbp_df['Событие'].unique().tolist()
+                            event_filter = st.multiselect(
+                                "Тип события:",
+                                options=event_types,
+                                default=[],
+                                key="pbp_event_filter"
+                            )
+
+                        # Применяем фильтры
+                        df_pbp_view = pbp_df
+                        if period_filter:
+                            df_pbp_view = df_pbp_view[df_pbp_view['Период'].isin(period_filter)]
+                        if event_filter:
+                            df_pbp_view = df_pbp_view[df_pbp_view['Событие'].isin(event_filter)]
+
+                        st.caption(f"Показано событий: {len(df_pbp_view)} из {len(pbp_df)}")
+                        st.dataframe(df_pbp_view, hide_index=True, use_container_width=True, height=400)
+
+                        # Скачать CSV
+                        csv_data = pbp_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8')
+                        st.download_button(
+                            label="📥 Скачать play-by-play (CSV)",
+                            data=csv_data,
+                            file_name=pbp_file,
+                            mime="text/csv",
+                            key="download_pbp_btn"
+                        )
                 else:
                     st.error("❌ Не удалось распарсить матч. Проверьте ID.")
 
@@ -587,6 +674,83 @@ elif st.session_state.page == 'match':
                         st.metric("Личных фолов", personal_fouls)
                 else:
                     st.error("❌ Не удалось распарсить фолы. Проверьте ID матча или наличие данных.")
+
+    # --- Блок отдельного парсинга play-by-play ---
+    st.divider()
+    st.subheader("📝 Отдельный парсинг play-by-play")
+    st.markdown("*Полный протокол событий матча (броски, фолы, замены, тайм-ауты)*")
+
+    pbp_game_id = st.text_input("ID матча для play-by-play", placeholder="Например: 1016417", value=game_id if game_id else "", key="pbp_game_id")
+    include_markers = st.checkbox("Показывать служебные маркеры событий", value=False, key="pbp_markers_checkbox")
+
+    if st.button("📝 Парсить только play-by-play", key="parse_pbp_only_btn"):
+        if not pbp_game_id:
+            st.warning("Введите ID матча")
+        else:
+            with st.spinner("📝 Парсинг play-by-play..."):
+                pbp_df_only = parse_play_by_play(pbp_game_id, include_markers=include_markers, verbose=False)
+
+                if pbp_df_only is not None:
+                    save_pbp_to_csv(pbp_df_only, pbp_game_id, verbose=False)
+                    st.success(f"✅ Найдено событий: {len(pbp_df_only)}!")
+
+                    # Таблица
+                    st.dataframe(pbp_df_only, hide_index=True, use_container_width=True, height=400)
+
+                    # Скачать CSV
+                    pbp_file = f"match_{pbp_game_id}_pbp.csv"
+                    csv_data = pbp_df_only.to_csv(index=False, encoding='utf-8-sig').encode('utf-8')
+                    st.download_button(
+                        label="📥 Скачать play-by-play (CSV)",
+                        data=csv_data,
+                        file_name=pbp_file,
+                        mime="text/csv",
+                        key="download_pbp_only_btn"
+                    )
+
+                    # Метрики
+                    col_p1, col_p2 = st.columns(2)
+                    with col_p1:
+                        st.metric("Событий всего", len(pbp_df_only))
+                    with col_p2:
+                        scored = pbp_df_only[pbp_df_only['Событие'].str.contains('забит', na=False)]
+                        st.metric("Результативных бросков", len(scored))
+                else:
+                    st.error("❌ Не удалось распарсить play-by-play. Проверьте ID матча или наличие данных.")
+
+    # --- Блок отдельного парсинга основной информации ---
+    st.divider()
+    st.subheader("ℹ️ Отдельный парсинг информации о матче")
+    st.markdown("*Основные данные: счёт, периоды, место, зрители, судьи*")
+
+    info_game_id = st.text_input("ID матча для информации", placeholder="Например: 1016417", value=game_id if game_id else "", key="info_game_id")
+
+    if st.button("ℹ️ Парсить только информацию", key="parse_info_only_btn"):
+        if not info_game_id:
+            st.warning("Введите ID матча")
+        else:
+            with st.spinner("Загрузка информации о матче..."):
+                summary_df_only = build_summary_df(info_game_id)
+
+                if summary_df_only is not None:
+                    save_summary_to_csv(summary_df_only, info_game_id, verbose=False)
+                    st.success("✅ Информация о матче получена!")
+
+                    # Таблица
+                    st.dataframe(summary_df_only, hide_index=True, use_container_width=True)
+
+                    # Скачать CSV
+                    info_file = f"match_{info_game_id}_info.csv"
+                    csv_data = summary_df_only.to_csv(index=False, encoding='utf-8-sig').encode('utf-8')
+                    st.download_button(
+                        label="📥 Скачать информацию о матче (CSV)",
+                        data=csv_data,
+                        file_name=info_file,
+                        mime="text/csv",
+                        key="download_info_only_btn"
+                    )
+                else:
+                    st.error("❌ Не удалось получить информацию. Проверьте ID матча.")
 
     # --- Блок визуализации графиков (вне условия парсинга) ---
     # Показываем только если файлы матча существуют
@@ -928,6 +1092,8 @@ elif st.session_state.page == 'about':
     - `match_*_players.csv` — статистика игроков
     - `match_*_teams_total.csv` — статистика команд
     - `match_*_fouls.csv` — все фолы матча (тип, время, игрок)
+    - `match_*_info.csv` — основная информация (счёт, периоды, место, зрители, судьи)
+    - `match_*_pbp.csv` — полный протокол событий play-by-play
 
     **Календарь:**
     - `matches_list_*.csv` — список матчей за период
@@ -940,7 +1106,9 @@ elif st.session_state.page == 'about':
     ### Функции
     - 📅 **Календарь** — поиск матчей по периоду
     - 🏀 **Матч** — детальная статистика игроков и команд + фолы
-    - 🟨 **Фолы** — парсинг всех фолов матча с классификацией (P, U, T, D, C, B, F)
+    - � **Play-by-play** — полный протокол событий матча в CSV
+    - ℹ️ **Инфо о матче** — основная информация (счёт, периоды, место, зрители) в CSV
+    - �🟨 **Фолы** — парсинг всех фолов матча с классификацией (P, U, T, D, C, B, F)
     - 👥 **Команда** — ростер, тренеры и статистика игроков за сезон (с автоподтягиванием прошлого сезона)
     - 📊 **Турнир** — турнирная таблица и шахматка результатов
     - 📈 **Визуализация** — графики прогрессии счёта и разницы в счёте
