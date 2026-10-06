@@ -11,6 +11,7 @@ from game_tracker import build_game_charts
 from foul_parser import parse_fouls, save_fouls_to_csv
 from team_parser import parse_team, save_team_to_csv, get_team_seasons
 from pbp_parser import parse_play_by_play, build_summary_df, save_summary_to_csv, save_pbp_to_csv
+from comp_discovery import discover_active_comps
 import streamlit.components.v1 as components
 
 
@@ -266,7 +267,7 @@ st.markdown("""
 
 # --- Инициализация session_state ---
 if 'page' not in st.session_state:
-    st.session_state.page = 'calendar'
+    st.session_state.page = 'home'
 if 'selected_game_id' not in st.session_state:
     st.session_state.selected_game_id = ""
 
@@ -276,24 +277,28 @@ def set_page(page_name):
 
 # Адаптивная навигация
 st.markdown('<div class="nav-container">', unsafe_allow_html=True)
-col_nav1, col_nav2, col_nav3, col_nav4, col_nav5 = st.columns(5)
+col_nav1, col_nav2, col_nav3, col_nav4, col_nav5, col_nav6 = st.columns(6)
 with col_nav1:
+    if st.button("🏠 Главная", key="nav_home", width="stretch", type="primary" if st.session_state.page == 'home' else "secondary"):
+        set_page('home')
+        st.rerun()
+with col_nav2:
     if st.button("📅 Календарь", key="nav_calendar", width="stretch", type="primary" if st.session_state.page == 'calendar' else "secondary"):
         set_page('calendar')
         st.rerun()
-with col_nav2:
+with col_nav3:
     if st.button("🏀 Матч", key="nav_match", width="stretch", type="primary" if st.session_state.page == 'match' else "secondary"):
         set_page('match')
         st.rerun()
-with col_nav3:
+with col_nav4:
     if st.button("👥 Команда", key="nav_team", width="stretch", type="primary" if st.session_state.page == 'team' else "secondary"):
         set_page('team')
         st.rerun()
-with col_nav4:
+with col_nav5:
     if st.button("📊 Турнир", key="nav_tournament", width="stretch", type="primary" if st.session_state.page == 'tournament' else "secondary"):
         set_page('tournament')
         st.rerun()
-with col_nav5:
+with col_nav6:
     if st.button("ℹ️ О проекте", key="nav_about", width="stretch", type="primary" if st.session_state.page == 'about' else "secondary"):
         set_page('about')
         st.rerun()
@@ -301,12 +306,117 @@ st.markdown('</div>', unsafe_allow_html=True)
 
 st.divider()
 
+# ==================== СТРАНИЦА: ГЛАВНАЯ ====================
+if st.session_state.page == 'home':
+    st.title("🏀 BBF Parser")
+    st.markdown("*Парсинг баскетбольной статистики белорусских соревнований*")
+
+    # Слайдеры окна поиска вокруг текущей даты
+    hb_col1, hb_col2 = st.columns(2)
+    with hb_col1:
+        home_days_back = st.slider("Искать матчи за (дней назад):", min_value=1, max_value=30, value=7, key="home_days_back")
+    with hb_col2:
+        home_days_fwd = st.slider("И матчи вперёд (дней):", min_value=1, max_value=30, value=7, key="home_days_fwd")
+
+    # Кнопка обновления списка
+    refresh_col, _ = st.columns([1, 2])
+    with refresh_col:
+        if st.button("🔄 Обновить список", key="home_refresh", type="primary"):
+            st.session_state.pop('active_comps', None)
+            st.rerun()
+
+    # Загружаем активные турниры (кэшируется в session_state)
+    if 'active_comps' not in st.session_state or st.session_state.get('active_comps_window') != (home_days_back, home_days_fwd):
+        with st.spinner("Ищу играющиеся сейчас турниры..."):
+            st.session_state.active_comps = discover_active_comps(home_days_back, home_days_fwd, verbose=False)
+            st.session_state.active_comps_window = (home_days_back, home_days_fwd)
+
+    active_comps = st.session_state.active_comps
+
+    if not active_comps:
+        st.warning("😴 Активных турниров не найдено. Попробуйте расширить диапазон дат или загляните позже.")
+        st.info("💡 Можно перейти на вкладку **📅 Календарь** и ввести ID этапа вручную.")
+    else:
+        st.success(f"🔥 Играются сейчас: {len(active_comps)} турниров")
+
+        # Карточки активных турниров
+        for idx, comp in enumerate(active_comps):
+            game = comp['nearest_game']
+            is_live = game.get('GameStatus') == 2
+
+            with st.container(border=True):
+                head_col, btn_col = st.columns([3, 1])
+                with head_col:
+                    live_badge = " 🔴 LIVE" if is_live else ""
+                    st.markdown(f"### 🏆 {comp['name']} · {comp['section']}{live_badge}")
+                    st.caption(
+                        f"ID этапа для парсинга: `{comp['comp_id']}` · "
+                        f"матчей в окне: {comp['games_count']} · "
+                        f"ближайший: {comp['nearest_date']}"
+                    )
+
+                    # Превью ближайшего матча
+                    if game.get('GameStatus') in (1, 2):
+                        score_preview = f"{game.get('ScoreA')}:{game.get('ScoreB')}"
+                    else:
+                        score_preview = game.get('GameTimeMsk', game.get('GameTime', '')) or '—'
+                    st.markdown(
+                        f"**Следующий матч:** {game.get('GameDate', '')} · "
+                        f"{game.get('ShortTeamNameAru', '').strip()} — {game.get('ShortTeamNameBru', '').strip()} "
+                        f"({score_preview})"
+                    )
+
+                with btn_col:
+                    st.write("")  # отступ для выравнивания
+                    if st.button("📅 Матчи", key=f"home_go_cal_{idx}", type="primary", width="stretch"):
+                        st.session_state.calendar_comp_id = str(comp['comp_id'])
+                        set_page('calendar')
+                        st.rerun()
+
+                # Разворачивающийся список всех матчей турнира в окне
+                with st.expander(f"📋 Все матчи ({comp['games_count']})"):
+                    rows = []
+                    for g in comp['games']:
+                        if g.get('GameStatus') in (1, 2):
+                            score = f"{g.get('ScoreA')}:{g.get('ScoreB')}"
+                        else:
+                            score = g.get('GameTimeMsk', g.get('GameTime', '')) or '—'
+                        rows.append({
+                            'ID': g.get('GameID'),
+                            'Дата': g.get('GameDate'),
+                            'Время': g.get('GameTimeMsk', g.get('GameTime', '')),
+                            'Хозяева': (g.get('ShortTeamNameAru') or '').strip(),
+                            'Гости': (g.get('ShortTeamNameBru') or '').strip(),
+                            'Счёт': score,
+                            'Этап': g.get('CompNameRu', ''),
+                            'Статус': '🔴 LIVE' if g.get('GameStatus') == 2 else ('✅ Завершён' if g.get('GameStatus') == 1 else '⏳ Ожидается'),
+                        })
+                    st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
+
+    # Быстрые подсказки
+    st.divider()
+    st.markdown("### 🚀 Что дальше?")
+    tip_col1, tip_col2, tip_col3 = st.columns(3)
+    with tip_col1:
+        st.markdown("**📅 Календарь**\n\nПоиск матчей за любой период с фильтрами")
+    with tip_col2:
+        st.markdown("**🏀 Матч**\n\nСтатистика, фолы и play-by-play по ID матча")
+    with tip_col3:
+        st.markdown("**👥 Команда / 📊 Турнир**\n\nРостеры, статистика сезонов, турнирные таблицы")
+
 # ==================== СТРАНИЦА: КАЛЕНДАРЬ ====================
-if st.session_state.page == 'calendar':
+elif st.session_state.page == 'calendar':
     st.title("📅 Календарь матчей")
     st.markdown("*Найдите матчи за период и выберите нужный для парсинга*")
-    
-    comp_id = st.text_input("ID этапа турнира", placeholder="Например: 50758", value="", key="cal_comp_id")
+
+    # Если ID пришёл с главной страницы — подставляем его
+    prefill_comp_id = st.session_state.pop('calendar_comp_id', "")
+    comp_id = st.text_input(
+        "ID этапа турнира",
+        placeholder="Например: 50758",
+        value=prefill_comp_id,
+        key="cal_comp_id"
+    )
     
     col_days1, col_days2 = st.columns(2)
     with col_days1:
@@ -1071,7 +1181,7 @@ elif st.session_state.page == 'about':
     
     | Endpoint | Назначение |
     |----------|------------|
-    | `Widget/CompIssue/{id}` | Список этапов сезона |
+    | `Widget/CompIssue/{id}` | Список этапов сезона (дерево турниров) |
     | `Widget/CompTeamResults/{id}` | Турнирная таблица (standings) |
     | `Widget/CrossTable/{id}` | Результаты матчей (crosstable) |
     | `Comp/GetCalendarCarousel/` | Календарь матчей |
@@ -1104,6 +1214,7 @@ elif st.session_state.page == 'about':
     - `team_*_stats_*.csv` — статистика игроков за сезон
 
     ### Функции
+    - 🏠 **Главная** — активные турниры в один клик (без поиска ID)
     - 📅 **Календарь** — поиск матчей по периоду
     - 🏀 **Матч** — детальная статистика игроков и команд + фолы
     - � **Play-by-play** — полный протокол событий матча в CSV
