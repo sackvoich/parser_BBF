@@ -11,7 +11,8 @@ from game_tracker import build_game_charts
 from foul_parser import parse_fouls, save_fouls_to_csv
 from team_parser import parse_team, save_team_to_csv, get_team_seasons
 from pbp_parser import parse_play_by_play, build_summary_df, save_summary_to_csv, save_pbp_to_csv
-from comp_discovery import discover_active_comps
+from comp_discovery import discover_active_comps, refresh_comp_games, has_live_games
+from datetime import date
 import streamlit.components.v1 as components
 
 
@@ -318,80 +319,138 @@ if st.session_state.page == 'home':
     with hb_col2:
         home_days_fwd = st.slider("И матчи вперёд (дней):", min_value=1, max_value=30, value=7, key="home_days_fwd")
 
-    # Кнопка обновления списка
-    refresh_col, _ = st.columns([1, 2])
+    # Ручное обновление (сбрасывает кэш)
+    refresh_col, auto_col, _ = st.columns([1, 1, 1])
     with refresh_col:
-        if st.button("🔄 Обновить список", key="home_refresh", type="primary"):
+        if st.button("🔄 Обновить всё", key="home_refresh", type="primary"):
             st.session_state.pop('active_comps', None)
+            st.session_state.pop('home_last_refresh', None)
             st.rerun()
+    with auto_col:
+        auto_refresh = st.toggle("🔴 Автообновление (30 сек)", value=st.session_state.get('auto_refresh', False), key="auto_refresh_toggle")
 
     # Загружаем активные турниры (кэшируется в session_state)
     if 'active_comps' not in st.session_state or st.session_state.get('active_comps_window') != (home_days_back, home_days_fwd):
         with st.spinner("Ищу играющиеся сейчас турниры..."):
             st.session_state.active_comps = discover_active_comps(home_days_back, home_days_fwd, verbose=False)
             st.session_state.active_comps_window = (home_days_back, home_days_fwd)
+            st.session_state.home_last_refresh = datetime.now()
 
     active_comps = st.session_state.active_comps
 
-    if not active_comps:
-        st.warning("😴 Активных турниров не найдено. Попробуйте расширить диапазон дат или загляните позже.")
-        st.info("💡 Можно перейти на вкладку **📅 Календарь** и ввести ID этапа вручную.")
-    else:
-        st.success(f"🔥 Играются сейчас: {len(active_comps)} турниров")
+    # === Автообновление: легкий рефреш матчей без перескока на главную ===
+    # Работает через st.fragment: обновляется ТОЛЬКО этот блок, не вся страница
+    @st.fragment(run_every=30 if auto_refresh else None)
+    def live_games_area():
+        # Точечное обновление матчей каждого турнира (без ре-скана дерева)
+        if auto_refresh:
+            try:
+                for comp in active_comps:
+                    refresh_comp_games(comp, home_days_back, home_days_fwd)
+                st.session_state.home_last_refresh = datetime.now()
+            except Exception:
+                pass  # сеть моргнула — показываем последний успешный срез
+
+        if not active_comps:
+            st.warning("😴 Активных турниров не найдено. Попробуйте расширить диапазон дат или загляните позже.")
+            st.info("💡 Можно перейти на вкладку **📅 Календарь** и ввести ID этапа вручную.")
+            return
+
+        last_refresh = st.session_state.get('home_last_refresh')
+        refresh_info = f"· обновлено: {last_refresh.strftime('%H:%M:%S')}" if last_refresh else ""
+        any_live = any(has_live_games(c) for c in active_comps)
+        status_icon = "🔴" if any_live else "🔥"
+        st.success(f"{status_icon} Играются сейчас: {len(active_comps)} турниров {refresh_info}")
 
         # Карточки активных турниров
         for idx, comp in enumerate(active_comps):
             game = comp['nearest_game']
-            is_live = game.get('GameStatus') == 2
+            comp_live = has_live_games(comp)
 
             with st.container(border=True):
                 head_col, btn_col = st.columns([3, 1])
                 with head_col:
-                    live_badge = " 🔴 LIVE" if is_live else ""
+                    live_badge = " 🔴 LIVE ИДЁТ" if comp_live else ""
                     st.markdown(f"### 🏆 {comp['name']} · {comp['section']}{live_badge}")
                     st.caption(
                         f"ID этапа для парсинга: `{comp['comp_id']}` · "
-                        f"матчей в окне: {comp['games_count']} · "
-                        f"ближайший: {comp['nearest_date']}"
-                    )
-
-                    # Превью ближайшего матча
-                    if game.get('GameStatus') in (1, 2):
-                        score_preview = f"{game.get('ScoreA')}:{game.get('ScoreB')}"
-                    else:
-                        score_preview = game.get('GameTimeMsk', game.get('GameTime', '')) or '—'
-                    st.markdown(
-                        f"**Следующий матч:** {game.get('GameDate', '')} · "
-                        f"{game.get('ShortTeamNameAru', '').strip()} — {game.get('ShortTeamNameBru', '').strip()} "
-                        f"({score_preview})"
+                        f"матчей в окне: {comp['games_count']}"
                     )
 
                 with btn_col:
                     st.write("")  # отступ для выравнивания
-                    if st.button("📅 Матчи", key=f"home_go_cal_{idx}", type="primary", width="stretch"):
+                    if st.button("📅 В календарь", key=f"home_go_cal_{idx}", width="stretch"):
                         st.session_state.calendar_comp_id = str(comp['comp_id'])
                         set_page('calendar')
                         st.rerun()
 
+                # === Быстрые кнопки перехода к матчам из диапазона ===
+                # Приоритет: LIVE матчи -> сегодняшние/будущие -> прошедшие (максимум 6 кнопок)
+                quick_games = comp['games'][:6]
+                if quick_games:
+                    st.caption("⚡ Быстрый переход к матчу:")
+                    # Сетка: 3 кнопки в ряд (по 2 строки максимум)
+                    for row_start in range(0, len(quick_games), 3):
+                        cols = st.columns(3)
+                        for ci, g in enumerate(quick_games[row_start:row_start + 3]):
+                            with cols[ci]:
+                                g_status = g.get('GameStatus', 0)
+                                if g_status == 2:
+                                    icon, cls = "🔴", "live"
+                                elif g_status == 1:
+                                    icon, cls = "✅", "done"
+                                else:
+                                    icon, cls = "⏳", "wait"
+                                # Подпись: "Борисфен - Рубон" + счёт/время
+                                ta = (g.get('ShortTeamNameAru') or '').strip()
+                                tb = (g.get('ShortTeamNameBru') or '').strip()
+                                if g_status in (1, 2):
+                                    sub = f"{g.get('ScoreA')}:{g.get('ScoreB')}"
+                                else:
+                                    sub = g.get('GameTimeMsk', g.get('GameTime', '')) or '—'
+                                if st.button(
+                                    f"{icon} {ta} — {tb} · {sub}",
+                                    key=f"home_game_{idx}_{g.get('GameID')}",
+                                    help=f"{g.get('GameDate', '')} · {g.get('CompNameRu', '')} · ID: {g.get('GameID')}",
+                                    width="stretch"
+                                ):
+                                    st.session_state.selected_game_id = str(g.get('GameID'))
+                                    set_page('match')
+                                    st.rerun()
+
                 # Разворачивающийся список всех матчей турнира в окне
                 with st.expander(f"📋 Все матчи ({comp['games_count']})"):
                     rows = []
+                    today_d = date.today()
                     for g in comp['games']:
                         if g.get('GameStatus') in (1, 2):
                             score = f"{g.get('ScoreA')}:{g.get('ScoreB')}"
                         else:
                             score = g.get('GameTimeMsk', g.get('GameTime', '')) or '—'
+                        try:
+                            dd, mm, yy = g.get('GameDate', '').split('.')
+                            gd = date(int(yy), int(mm), int(dd))
+                            if g.get('GameStatus') == 2:
+                                date_label = f"🔴 {g.get('GameDate')} LIVE"
+                            elif gd == today_d:
+                                date_label = f"📌 {g.get('GameDate')} сегодня"
+                            else:
+                                date_label = g.get('GameDate')
+                        except Exception:
+                            date_label = g.get('GameDate')
                         rows.append({
                             'ID': g.get('GameID'),
-                            'Дата': g.get('GameDate'),
+                            'Дата': date_label,
                             'Время': g.get('GameTimeMsk', g.get('GameTime', '')),
                             'Хозяева': (g.get('ShortTeamNameAru') or '').strip(),
                             'Гости': (g.get('ShortTeamNameBru') or '').strip(),
                             'Счёт': score,
                             'Этап': g.get('CompNameRu', ''),
-                            'Статус': '🔴 LIVE' if g.get('GameStatus') == 2 else ('✅ Завершён' if g.get('GameStatus') == 1 else '⏳ Ожидается'),
                         })
                     st.dataframe(pd.DataFrame(rows), hide_index=True, width='stretch')
+
+    # Рендерим область турниров с автообновлением
+    live_games_area()
 
     # Быстрые подсказки
     st.divider()

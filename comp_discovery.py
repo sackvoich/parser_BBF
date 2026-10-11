@@ -13,7 +13,7 @@
 играющиеся сейчас соревнования.
 """
 import requests
-from datetime import datetime
+from datetime import datetime, date
 
 BASE_URL = "https://org.infobasket.su"
 
@@ -94,6 +94,51 @@ def _walk_tree(comp_id, depth=0, max_depth=5):
     return nodes
 
 
+def refresh_comp_games(comp_entry, days_back=7, days_forward=7):
+    """
+    Точечное обновление списка матчей одного турнира (без полного ре-скана).
+
+    Args:
+        comp_entry: dict из discover_active_comps() — обновляет по ссылке 'games'
+        days_back, days_forward: окно календаря
+
+    Returns:
+        int: количество матчей после обновления
+    """
+    games = get_calendar_games(comp_entry['comp_id'], days_back, days_forward)
+
+    def parse_game_date(g):
+        try:
+            d, m, y = g.get('GameDate', '').split('.')
+            return date(int(y), int(m), int(d))
+        except Exception:
+            return date.max
+
+    today = date.today()
+
+    def game_sort_key(g):
+        status = g.get('GameStatus', 0)
+        gd = parse_game_date(g)
+        if status == 2:
+            return (0, 0)
+        if gd >= today:
+            return (1, gd.toordinal())
+        return (2, -gd.toordinal())
+
+    games_sorted = sorted(games, key=game_sort_key)
+    comp_entry['games'] = games_sorted
+    comp_entry['games_count'] = len(games_sorted)
+    if games_sorted:
+        comp_entry['nearest_game'] = games_sorted[0]
+        comp_entry['nearest_date'] = games_sorted[0].get('GameDate', '')
+    return len(games_sorted)
+
+
+def has_live_games(comp_entry):
+    """Есть ли в турнире хотя бы один LIVE-матч прямо сейчас."""
+    return any(g.get('GameStatus') == 2 for g in comp_entry.get('games', []))
+
+
 def discover_active_comps(days_back=7, days_forward=7, verbose=False):
     """
     Находит активные турниры БФБ: обходит дерево от корня и проверяет календарь.
@@ -141,11 +186,25 @@ def discover_active_comps(days_back=7, days_forward=7, verbose=False):
             if not games:
                 continue
 
-            # Ближайшая игра: сначала LIVE и сегодня, потом по дате
+            # Парсим дату матча (dd.mm.yyyy) для честной хронологической сортировки
+            def parse_game_date(g):
+                try:
+                    d, m, y = g.get('GameDate', '').split('.')
+                    return date(int(y), int(m), int(d))
+                except Exception:
+                    return date.max
+
+            today = date.today()
+
+            # Ближайшая игра: LIVE > идёт сегодня > будущие (ближайшие сверху) > прошедшие (недавние сверху)
             def game_sort_key(g):
                 status = g.get('GameStatus', 0)
-                live_first = 0 if status == 2 else 1
-                return (live_first, g.get('GameDateInt', 999999))
+                gd = parse_game_date(g)
+                if status == 2:
+                    return (0, 0)  # LIVE всегда сверху
+                if gd >= today:
+                    return (1, gd.toordinal())  # сегодня и будущие по возрастанию
+                return (2, -gd.toordinal())  # прошедшие: недавние сверху
 
             games_sorted = sorted(games, key=game_sort_key)
             nearest = games_sorted[0]
